@@ -19,6 +19,7 @@ ENABLE_LIBYOSYS := 0
 ENABLE_GPROF := 0
 ENABLE_NDEBUG := 0
 LINK_CURSES := 0
+LINK_TERMCAP := 0
 
 # clang sanitizers
 SANITIZER =
@@ -56,12 +57,15 @@ VPATH := $(YOSYS_SRC)
 CXXFLAGS := $(CXXFLAGS) -Wall -Wextra -ggdb -I. -I"$(YOSYS_SRC)" -MD -D_YOSYS_ -fPIC -I$(PREFIX)/include
 LDFLAGS := $(LDFLAGS) -L$(LIBDIR)
 LDLIBS := $(LDLIBS) -lstdc++ -lm
+PLUGIN_LDFLAGS :=
 
 PKG_CONFIG ?= pkg-config
 SED ?= sed
 BISON ?= bison
 
 ifeq (Darwin,$(findstring Darwin,$(shell uname)))
+PLUGIN_LDFLAGS += -undefined dynamic_lookup
+
 # homebrew search paths
 ifneq ($(shell which brew),)
 BREW_PREFIX := $(shell brew --prefix)/opt
@@ -79,6 +83,7 @@ LDFLAGS += -L$(PORT_PREFIX)/lib
 PKG_CONFIG_PATH := $(PORT_PREFIX)/lib/pkgconfig:$(PKG_CONFIG_PATH)
 export PATH := $(PORT_PREFIX)/bin:$(PATH)
 endif
+
 else
 LDFLAGS += -rdynamic
 LDLIBS += -lrt
@@ -94,10 +99,10 @@ OBJS = kernel/version_$(GIT_REV).o
 # is just a symlink to your actual ABC working directory, as 'make mrproper'
 # will remove the 'abc' directory and you do not want to accidentally
 # delete your work on ABC..
-ABCREV = efbf7f13ea9e
+ABCREV = cd6984ee82d4
 ABCPULL = 1
 ABCURL ?= https://bitbucket.org/alanmi/abc
-ABCMKARGS = CC="$(CXX)" CXX="$(CXX)"
+ABCMKARGS = CC="$(CXX)" CXX="$(CXX)" ABC_USE_LIBSTDCXX=1
 
 # set ABCEXTERNAL = <abc-command> to use an external ABC instance
 # Note: The in-tree ABC (yosys-abc) will not be installed when ABCEXTERNAL is set.
@@ -212,6 +217,10 @@ LDLIBS += -lreadline
 ifeq ($(LINK_CURSES),1)
 LDLIBS += -lcurses
 ABCMKARGS += "ABC_READLINE_LIBRARIES=-lcurses -lreadline"
+endif
+ifeq ($(LINK_TERMCAP),1)
+LDLIBS += -ltermcap
+ABCMKARGS += "ABC_READLINE_LIBRARIES=-lreadline -ltermcap"
 endif
 ifeq ($(CONFIG),mxe)
 LDLIBS += -ltermcap
@@ -402,7 +411,7 @@ kernel/version_$(GIT_REV).cc: $(YOSYS_SRC)/Makefile
 
 yosys-config: misc/yosys-config.in
 	$(P) $(SED) -e 's#@CXXFLAGS@#$(subst -I. -I"$(YOSYS_SRC)",-I"$(DATDIR)/include",$(CXXFLAGS))#;' \
-			-e 's#@CXX@#$(CXX)#;' -e 's#@LDFLAGS@#$(LDFLAGS)#;' -e 's#@LDLIBS@#$(LDLIBS)#;' \
+			-e 's#@CXX@#$(CXX)#;' -e 's#@LDFLAGS@#$(LDFLAGS) $(PLUGIN_LDFLAGS)#;' -e 's#@LDLIBS@#$(LDLIBS)#;' \
 			-e 's#@BINDIR@#$(BINDIR)#;' -e 's#@DATDIR@#$(DATDIR)#;' < $< > yosys-config
 	$(Q) chmod +x yosys-config
 
@@ -504,6 +513,14 @@ clean:
 	rm -f $(OBJS) $(GENFILES) $(TARGETS) $(EXTRA_TARGETS) $(EXTRA_OBJS)
 	rm -f kernel/version_*.o kernel/version_*.cc abc/abc-[0-9a-f]*
 	rm -f libs/*/*.d frontends/*/*.d passes/*/*.d backends/*/*.d kernel/*.d techlibs/*/*.d
+	rm -rf tests/asicworld/*.out tests/asicworld/*.log
+	rm -rf tests/hana/*.out tests/hana/*.log
+	rm -rf tests/simple/*.out tests/simple/*.log
+	rm -rf tests/memories/*.out tests/memories/*.log tests/memories/*.dmp
+	rm -rf tests/sat/*.log tests/techmap/*.log tests/various/*.log
+	rm -rf tests/bram/temp tests/fsm/temp tests/realmath/temp tests/share/temp tests/smv/temp
+	rm -rf vloghtb/Makefile vloghtb/refdat vloghtb/rtl vloghtb/scripts vloghtb/spec vloghtb/check_yosys vloghtb/vloghammer_tb.tar.bz2 vloghtb/temp vloghtb/log_test_*
+	rm -f  tests/tools/cmp_tbdata
 
 clean-abc:
 	$(MAKE) -C abc DEP= clean

@@ -371,13 +371,13 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 		if (cell->type.in("$reduce_and", "$_AND_"))
 			detect_const_and = true;
 
-		if (cell->type.in("$and", "$logic_and") && GetSize(cell->getPort("\\A")) == 1 && GetSize(cell->getPort("\\B")) == 1)
+		if (cell->type.in("$and", "$logic_and") && GetSize(cell->getPort("\\A")) == 1 && GetSize(cell->getPort("\\B")) == 1 && !cell->getParam("\\A_SIGNED").as_bool())
 			detect_const_and = true;
 
 		if (cell->type.in("$reduce_or", "$reduce_bool", "$_OR_"))
 			detect_const_or = true;
 
-		if (cell->type.in("$or", "$logic_or") && GetSize(cell->getPort("\\A")) == 1 && GetSize(cell->getPort("\\B")) == 1)
+		if (cell->type.in("$or", "$logic_or") && GetSize(cell->getPort("\\A")) == 1 && GetSize(cell->getPort("\\B")) == 1 && !cell->getParam("\\A_SIGNED").as_bool())
 			detect_const_or = true;
 
 		if (detect_const_and || detect_const_or)
@@ -448,6 +448,53 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 					cell->type == "$and" || cell->type == "$or" || cell->type == "$xor" || cell->type == "$xnor")
 				if (group_cell_inputs(module, cell, true, assign_map))
 					goto next_cell;
+
+			if (cell->type == "$logic_not" || cell->type == "$logic_and" || cell->type == "$logic_or" ||
+					cell->type == "$reduce_or" || cell->type == "$reduce_and" || cell->type == "$reduce_bool")
+			{
+				SigBit neutral_bit = cell->type == "$reduce_and" ? State::S1 : State::S0;
+
+				RTLIL::SigSpec sig_a = assign_map(cell->getPort("\\A"));
+				RTLIL::SigSpec new_sig_a;
+
+				for (auto bit : sig_a)
+					if (bit != neutral_bit) new_sig_a.append(bit);
+
+				if (GetSize(new_sig_a) == 0)
+					new_sig_a.append(neutral_bit);
+
+				if (GetSize(new_sig_a) < GetSize(sig_a)) {
+					cover_list("opt.opt_expr.fine.neutral_A", "$logic_not", "$logic_and", "$logic_or", "$reduce_or", "$reduce_and", "$reduce_bool", cell->type.str());
+					log("Replacing port A of %s cell `%s' in module `%s' with shorter expression: %s -> %s\n",
+							cell->type.c_str(), cell->name.c_str(), module->name.c_str(), log_signal(sig_a), log_signal(new_sig_a));
+					cell->setPort("\\A", new_sig_a);
+					cell->parameters.at("\\A_WIDTH") = GetSize(new_sig_a);
+					did_something = true;
+				}
+			}
+
+			if (cell->type == "$logic_and" || cell->type == "$logic_or")
+			{
+				SigBit neutral_bit = State::S0;
+
+				RTLIL::SigSpec sig_b = assign_map(cell->getPort("\\B"));
+				RTLIL::SigSpec new_sig_b;
+
+				for (auto bit : sig_b)
+					if (bit != neutral_bit) new_sig_b.append(bit);
+
+				if (GetSize(new_sig_b) == 0)
+					new_sig_b.append(neutral_bit);
+
+				if (GetSize(new_sig_b) < GetSize(sig_b)) {
+					cover_list("opt.opt_expr.fine.neutral_B", "$logic_and", "$logic_or", cell->type.str());
+					log("Replacing port B of %s cell `%s' in module `%s' with shorter expression: %s -> %s\n",
+							cell->type.c_str(), cell->name.c_str(), module->name.c_str(), log_signal(sig_b), log_signal(new_sig_b));
+					cell->setPort("\\B", new_sig_b);
+					cell->parameters.at("\\B_WIDTH") = GetSize(new_sig_b);
+					did_something = true;
+				}
+			}
 
 			if (cell->type == "$reduce_and")
 			{
@@ -1202,6 +1249,81 @@ void replace_const_cells(RTLIL::Design *design, RTLIL::Module *module, bool cons
 						did_something = true;
 						goto next_cell;
 					}
+			}
+		}
+
+		// remove redundant pairs of bits in ==, ===, !=, and !==
+		// replace cell with const driver if inputs can't be equal
+		if (do_fine && cell->type.in("$eq", "$ne", "$eqx", "$nex"))
+		{
+			pool<pair<SigBit, SigBit>> redundant_cache;
+			mfp<SigBit> contradiction_cache;
+
+			contradiction_cache.promote(State::S0);
+			contradiction_cache.promote(State::S1);
+
+			int a_width = cell->getParam("\\A_WIDTH").as_int();
+			int b_width = cell->getParam("\\B_WIDTH").as_int();
+
+			bool is_signed = cell->getParam("\\A_SIGNED").as_bool();
+			int width = is_signed ? std::min(a_width, b_width) : std::max(a_width, b_width);
+
+			SigSpec sig_a = cell->getPort("\\A");
+			SigSpec sig_b = cell->getPort("\\B");
+
+			int redundant_bits = 0;
+
+			for (int i = width-1; i >= 0; i--)
+			{
+				SigBit bit_a = i < a_width ? assign_map(sig_a[i]) : State::S0;
+				SigBit bit_b = i < b_width ? assign_map(sig_b[i]) : State::S0;
+
+				if (bit_a != State::Sx && bit_a != State::Sz &&
+						bit_b != State::Sx && bit_b != State::Sz)
+					contradiction_cache.merge(bit_a, bit_b);
+
+				if (bit_b < bit_a)
+					std::swap(bit_a, bit_b);
+
+				pair<SigBit, SigBit> key(bit_a, bit_b);
+
+				if (redundant_cache.count(key)) {
+					if (i < a_width) sig_a.remove(i);
+					if (i < b_width) sig_b.remove(i);
+					redundant_bits++;
+					continue;
+				}
+
+				redundant_cache.insert(key);
+			}
+
+			if (contradiction_cache.find(State::S0) == contradiction_cache.find(State::S1))
+			{
+				SigSpec y_sig = cell->getPort("\\Y");
+				Const y_value(cell->type.in("$eq", "$eqx") ? 0 : 1, GetSize(y_sig));
+
+				log("Replacing cell `%s' in module `%s' with constant driver %s.\n",
+					log_id(cell), log_id(module), log_signal(y_value));
+
+				module->connect(y_sig, y_value);
+				module->remove(cell);
+
+				did_something = true;
+				goto next_cell;
+			}
+
+			if (redundant_bits)
+			{
+				log("Removed %d redundant input bits from %s cell `%s' in module `%s'.\n",
+						redundant_bits, log_id(cell->type), log_id(cell), log_id(module));
+
+				cell->setPort("\\A", sig_a);
+				cell->setPort("\\B", sig_b);
+				cell->setParam("\\A_WIDTH", GetSize(sig_a));
+				cell->setParam("\\B_WIDTH", GetSize(sig_b));
+
+				did_something = true;
+				goto next_cell;
 			}
 		}
 

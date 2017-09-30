@@ -33,6 +33,7 @@ aimfile = None
 aiwfile = None
 aigheader = True
 vlogtbfile = None
+vlogtbtop = None
 inconstr = list()
 outconstr = None
 gentrace = False
@@ -43,6 +44,10 @@ assume_skipped = None
 final_only = False
 topmod = None
 noinfo = False
+presat = False
+smtcinit = False
+smtctop = None
+noinit = False
 so = SmtOpts()
 
 
@@ -91,6 +96,13 @@ yosys-smtbmc [options] <yosys_smt2_output>
         only run the core proof, do not collect and print any
         additional information (e.g. which assert failed)
 
+    --presat
+        check if the design with assumptions but without assertions
+        is SAT before checking if assertions are UNSAT. This will
+        detect if there are contradicting assumtions. In some cases
+        this will also help to "warmup" the solver, potentially
+        yielding a speedup.
+
     --final-only
         only check final constraints, assume base case
 
@@ -107,8 +119,23 @@ yosys-smtbmc [options] <yosys_smt2_output>
     --dump-vlogtb <verilog_filename>
         write trace as Verilog test bench
 
+    --vlogtb-top <hierarchical_name>
+        use the given entity as top module for the generated
+        Verilog test bench. The <hierarchical_name> is relative
+        to the design top module without the top module name.
+
     --dump-smtc <constr_filename>
         write trace as constraints file
+
+    --smtc-init
+        write just the last state as initial constraint to smtc file
+
+    --smtc-top <old>[:<new>]
+        replace <old> with <new> in constraints dumped to smtc
+        file and only dump object below <old> in design hierarchy.
+
+    --noinit
+        do not assume initial conditions in state 0
 
     --dump-all
         when using -g or -i, create a dump file for each
@@ -125,8 +152,9 @@ yosys-smtbmc [options] <yosys_smt2_output>
 
 try:
     opts, args = getopt.getopt(sys.argv[1:], so.shortopts + "t:igcm:", so.longopts +
-            ["final-only", "assume-skipped=", "smtc=", "cex=", "aig=", "aig-noheader",
-             "dump-vcd=", "dump-vlogtb=", "dump-smtc=", "dump-all", "noinfo", "append="])
+            ["final-only", "assume-skipped=", "smtc=", "cex=", "aig=", "aig-noheader", "presat",
+             "dump-vcd=", "dump-vlogtb=", "vlogtb-top=", "dump-smtc=", "dump-all", "noinfo", "append=",
+             "smtc-init", "smtc-top=", "noinit"])
 except:
     usage()
 
@@ -165,12 +193,26 @@ for o, a in opts:
         vcdfile = a
     elif o == "--dump-vlogtb":
         vlogtbfile = a
+    elif o == "--vlogtb-top":
+        vlogtbtop = a
     elif o == "--dump-smtc":
         outconstr = a
+    elif o == "--smtc-init":
+        smtcinit = True
+    elif o == "--smtc-top":
+        smtctop = a.split(":")
+        if len(smtctop) == 1:
+            smtctop.append("")
+        assert len(smtctop) == 2
+        smtctop = tuple(smtctop)
     elif o == "--dump-all":
         dumpall = True
+    elif o == "--presat":
+        presat = True
     elif o == "--noinfo":
         noinfo = True
+    elif o == "--noinit":
+        noinit = True
     elif o == "--append":
         append_steps = int(a)
     elif o == "-i":
@@ -661,18 +703,35 @@ def write_vlogtb_trace(steps_start, steps_stop, index):
     filename = vlogtbfile.replace("%", index)
     print_msg("Writing trace to Verilog testbench: %s" % (filename))
 
+    vlogtb_topmod = topmod
+    vlogtb_state = "s@@step_idx@@"
+
+    if vlogtbtop is not None:
+        for item in vlogtbtop.split("."):
+            assert item in smt.modinfo[vlogtb_topmod].cells
+            vlogtb_state = "(|%s_h %s| %s)" % (vlogtb_topmod, item, vlogtb_state)
+            vlogtb_topmod = smt.modinfo[vlogtb_topmod].cells[item]
+
     with open(filename, "w") as f:
+        print("`ifndef VERILATOR", file=f)
         print("module testbench;", file=f)
         print("  reg [4095:0] vcdfile;", file=f)
-        print("  reg clock = 0, genclock = 1;", file=f)
+        print("  reg clock;", file=f)
+        print("`else", file=f)
+        print("module testbench(input clock, output reg genclock);", file=f)
+        print("  initial genclock = 1;", file=f)
+        print("`endif", file=f)
+
+        print("  reg genclock = 1;", file=f)
+        print("  reg [31:0] cycle = 0;", file=f)
 
         primary_inputs = list()
         clock_inputs = set()
 
-        for name in smt.modinfo[topmod].inputs:
+        for name in smt.modinfo[vlogtb_topmod].inputs:
             if name in ["clk", "clock", "CLK", "CLOCK"]:
                 clock_inputs.add(name)
-            width = smt.modinfo[topmod].wsize[name]
+            width = smt.modinfo[vlogtb_topmod].wsize[name]
             primary_inputs.append((name, width))
 
         for name, width in primary_inputs:
@@ -681,27 +740,32 @@ def write_vlogtb_trace(steps_start, steps_stop, index):
             else:
                 print("  reg [%d:0] PI_%s;" % (width-1, name), file=f)
 
-        print("  %s UUT (" % topmod, file=f)
+        print("  %s UUT (" % vlogtb_topmod, file=f)
         print(",\n".join("    .{name}(PI_{name})".format(name=name) for name, _ in primary_inputs), file=f)
         print("  );", file=f)
 
+        print("`ifndef VERILATOR", file=f)
         print("  initial begin", file=f)
         print("    if ($value$plusargs(\"vcd=%s\", vcdfile)) begin", file=f)
         print("      $dumpfile(vcdfile);", file=f)
         print("      $dumpvars(0, testbench);", file=f)
         print("    end", file=f)
+        print("    #5 clock = 0;", file=f)
         print("    while (genclock) begin", file=f)
-        print("      #5; clock = 0;", file=f)
-        print("      #5; clock = 1;", file=f)
+        print("      #5 clock = 0;", file=f)
+        print("      #5 clock = 1;", file=f)
         print("    end", file=f)
         print("  end", file=f)
+        print("`endif", file=f)
 
         print("  initial begin", file=f)
 
-        regs = sorted(smt.hiernets(topmod, regs_only=True))
-        regvals = smt.get_net_bin_list(topmod, regs, "s%d" % steps_start)
+        regs = sorted(smt.hiernets(vlogtb_topmod, regs_only=True))
+        regvals = smt.get_net_bin_list(vlogtb_topmod, regs, vlogtb_state.replace("@@step_idx@@", str(steps_start)))
 
+        print("`ifndef VERILATOR", file=f)
         print("    #1;", file=f)
+        print("`endif", file=f)
         for reg, val in zip(regs, regvals):
             hidden_net = False
             for n in reg:
@@ -709,23 +773,23 @@ def write_vlogtb_trace(steps_start, steps_stop, index):
                     hidden_net = True
             print("    %sUUT.%s = %d'b%s;" % ("// " if hidden_net else "", ".".join(reg), len(val), val), file=f)
 
-        anyconsts = sorted(smt.hieranyconsts(topmod))
+        anyconsts = sorted(smt.hieranyconsts(vlogtb_topmod))
         for info in anyconsts:
             if info[3] is not None:
-                modstate = smt.net_expr(topmod, "s%d" % steps_start, info[0])
+                modstate = smt.net_expr(vlogtb_topmod, vlogtb_state.replace("@@step_idx@@", str(steps_start)), info[0])
                 value = smt.bv2bin(smt.get("(|%s| %s)" % (info[1], modstate)))
                 print("    UUT.%s = %d'b%s;" % (".".join(info[0] + [info[3]]), len(value), value), file=f);
 
-        mems = sorted(smt.hiermems(topmod))
+        mems = sorted(smt.hiermems(vlogtb_topmod))
         for mempath in mems:
-            abits, width, rports, wports = smt.mem_info(topmod, mempath)
+            abits, width, rports, wports = smt.mem_info(vlogtb_topmod, mempath)
 
             addr_expr_list = list()
             data_expr_list = list()
             for i in range(steps_start, steps_stop):
                 for j in range(rports):
-                    addr_expr_list.append(smt.mem_expr(topmod, "s%d" % i, mempath, "R%dA" % j))
-                    data_expr_list.append(smt.mem_expr(topmod, "s%d" % i, mempath, "R%dD" % j))
+                    addr_expr_list.append(smt.mem_expr(vlogtb_topmod, vlogtb_state.replace("@@step_idx@@", str(i)), mempath, "R%dA" % j))
+                    data_expr_list.append(smt.mem_expr(vlogtb_topmod, vlogtb_state.replace("@@step_idx@@", str(i)), mempath, "R%dD" % j))
 
             addr_list = smt.get_list(addr_expr_list)
             data_list = smt.get_list(data_expr_list)
@@ -740,26 +804,43 @@ def write_vlogtb_trace(steps_start, steps_stop, index):
             for addr, data in addr_data.items():
                 print("    UUT.%s[%d'b%s] = %d'b%s;" % (".".join(mempath), len(addr), addr, len(data), data), file=f)
 
-        anyseqs = sorted(smt.hieranyseqs(topmod))
+        print("", file=f)
+        anyseqs = sorted(smt.hieranyseqs(vlogtb_topmod))
 
         for i in range(steps_start, steps_stop):
             pi_names = [[name] for name, _ in primary_inputs if name not in clock_inputs]
-            pi_values = smt.get_net_bin_list(topmod, pi_names, "s%d" % i)
+            pi_values = smt.get_net_bin_list(vlogtb_topmod, pi_names, vlogtb_state.replace("@@step_idx@@", str(i)))
 
-            print("    #1;", file=f)
             print("    // state %d" % i, file=f)
+
             if i > 0:
-                print("    @(posedge clock);", file=f)
+                print("    if (cycle == %d) begin" % (i-1), file=f)
+
             for name, val in zip(pi_names, pi_values):
-                print("    PI_%s <= %d'b%s;" % (".".join(name), len(val), val), file=f)
+                if i > 0:
+                    print("      PI_%s <= %d'b%s;" % (".".join(name), len(val), val), file=f)
+                else:
+                    print("    PI_%s = %d'b%s;" % (".".join(name), len(val), val), file=f)
 
             for info in anyseqs:
                 if info[3] is not None:
-                    modstate = smt.net_expr(topmod, "s%d" % steps_start, info[0])
+                    modstate = smt.net_expr(vlogtb_topmod, vlogtb_state.replace("@@step_idx@@", str(i)), info[0])
                     value = smt.bv2bin(smt.get("(|%s| %s)" % (info[1], modstate)))
-                    print("    UUT.%s = %d'b%s;" % (".".join(info[0] + [info[3]]), len(value), value), file=f);
+                    if i > 0:
+                        print("      UUT.%s <= %d'b%s;" % (".".join(info[0] + [info[3]]), len(value), value), file=f);
+                    else:
+                        print("    UUT.%s = %d'b%s;" % (".".join(info[0] + [info[3]]), len(value), value), file=f);
 
-        print("    genclock = 0;", file=f)
+            if i > 0:
+                print("    end", file=f)
+                print("", file=f)
+
+            if i == 0:
+                print("  end", file=f)
+                print("  always @(posedge clock) begin", file=f)
+
+        print("    genclock <= cycle < %d;" % (steps_stop-1), file=f)
+        print("    cycle <= cycle + 1;", file=f)
         print("  end", file=f)
 
         print("endmodule", file=f)
@@ -769,34 +850,49 @@ def write_constr_trace(steps_start, steps_stop, index):
     filename = outconstr.replace("%", index)
     print_msg("Writing trace to constraints file: %s" % (filename))
 
+    constr_topmod = topmod
+    constr_state = "s@@step_idx@@"
+    constr_prefix = ""
+
+    if smtctop is not None:
+        for item in smtctop[0].split("."):
+            assert item in smt.modinfo[constr_topmod].cells
+            constr_state = "(|%s_h %s| %s)" % (constr_topmod, item, constr_state)
+            constr_topmod = smt.modinfo[constr_topmod].cells[item]
+        if smtctop[1] != "":
+            constr_prefix = smtctop[1] + "."
+
+    if smtcinit:
+        steps_start = steps_stop - 1
+
     with open(filename, "w") as f:
         primary_inputs = list()
 
-        for name in smt.modinfo[topmod].inputs:
-            width = smt.modinfo[topmod].wsize[name]
+        for name in smt.modinfo[constr_topmod].inputs:
+            width = smt.modinfo[constr_topmod].wsize[name]
             primary_inputs.append((name, width))
 
-        if steps_start == 0:
+        if steps_start == 0 or smtcinit:
             print("initial", file=f)
         else:
             print("state %d" % steps_start, file=f)
 
-        regnames = sorted(smt.hiernets(topmod, regs_only=True))
-        regvals = smt.get_net_list(topmod, regnames, "s%d" % steps_start)
+        regnames = sorted(smt.hiernets(constr_topmod, regs_only=True))
+        regvals = smt.get_net_list(constr_topmod, regnames, constr_state.replace("@@step_idx@@", str(steps_start)))
 
         for name, val in zip(regnames, regvals):
-            print("assume (= [%s] %s)" % (".".join(name), val), file=f)
+            print("assume (= [%s%s] %s)" % (constr_prefix, ".".join(name), val), file=f)
 
-        mems = sorted(smt.hiermems(topmod))
+        mems = sorted(smt.hiermems(constr_topmod))
         for mempath in mems:
-            abits, width, rports, wports = smt.mem_info(topmod, mempath)
+            abits, width, rports, wports = smt.mem_info(constr_topmod, mempath)
 
             addr_expr_list = list()
             data_expr_list = list()
             for i in range(steps_start, steps_stop):
                 for j in range(rports):
-                    addr_expr_list.append(smt.mem_expr(topmod, "s%d" % i, mempath, "R%dA" % j))
-                    data_expr_list.append(smt.mem_expr(topmod, "s%d" % i, mempath, "R%dD" % j))
+                    addr_expr_list.append(smt.mem_expr(constr_topmod, constr_state.replace("@@step_idx@@", str(i)), mempath, "R%dA" % j))
+                    data_expr_list.append(smt.mem_expr(constr_topmod, constr_state.replace("@@step_idx@@", str(i)), mempath, "R%dD" % j))
 
             addr_list = smt.get_list(addr_expr_list)
             data_list = smt.get_list(data_expr_list)
@@ -807,17 +903,18 @@ def write_constr_trace(steps_start, steps_stop, index):
                     addr_data[addr] = data
 
             for addr, data in addr_data.items():
-                print("assume (= (select [%s] %s) %s)" % (".".join(mempath), addr, data), file=f)
+                print("assume (= (select [%s%s] %s) %s)" % (constr_prefix, ".".join(mempath), addr, data), file=f)
 
         for k in range(steps_start, steps_stop):
-            print("", file=f)
-            print("state %d" % k, file=f)
+            if not smtcinit:
+                print("", file=f)
+                print("state %d" % k, file=f)
 
             pi_names = [[name] for name, _ in sorted(primary_inputs)]
-            pi_values = smt.get_net_list(topmod, pi_names, "s%d" % k)
+            pi_values = smt.get_net_list(constr_topmod, pi_names, constr_state.replace("@@step_idx@@", str(k)))
 
             for name, val in zip(pi_names, pi_values):
-                print("assume (= [%s] %s)" % (".".join(name), val), file=f)
+                print("assume (= [%s%s] %s)" % (constr_prefix, ".".join(name), val), file=f)
 
 
 def write_trace(steps_start, steps_stop, index):
@@ -977,8 +1074,11 @@ elif covermode:
         smt.write("(assert %s)" % get_constr_expr(constr_assumes, step))
 
         if step == 0:
-            smt.write("(assert (|%s_i| s0))" % (topmod))
-            smt.write("(assert (|%s_is| s0))" % (topmod))
+            if noinit:
+                smt.write("(assert (not (|%s_is| s%d)))" % (topmod, step))
+            else:
+                smt.write("(assert (|%s_i| s0))" % (topmod))
+                smt.write("(assert (|%s_is| s0))" % (topmod))
 
         else:
             smt.write("(assert (|%s_t| s%d s%d))" % (topmod, step-1, step))
@@ -1057,8 +1157,11 @@ else:  # not tempind, covermode
         smt.write("(assert %s)" % get_constr_expr(constr_assumes, step))
 
         if step == 0:
-            smt.write("(assert (|%s_i| s0))" % (topmod))
-            smt.write("(assert (|%s_is| s0))" % (topmod))
+            if noinit:
+                smt.write("(assert (not (|%s_is| s%d)))" % (topmod, step))
+            else:
+                smt.write("(assert (|%s_i| s0))" % (topmod))
+                smt.write("(assert (|%s_is| s0))" % (topmod))
 
         else:
             smt.write("(assert (|%s_t| s%d s%d))" % (topmod, step-1, step))
@@ -1086,11 +1189,22 @@ else:  # not tempind, covermode
                 last_check_step = step+i
 
         if not gentrace:
+            if presat:
+                if last_check_step == step:
+                    print_msg("Checking assumptions in step %d.." % (step))
+                else:
+                    print_msg("Checking assumptions in steps %d to %d.." % (step, last_check_step))
+
+                if smt.check_sat() == "unsat":
+                    print("%s Warmup failed!" % smt.timestamp())
+                    retstatus = False
+                    break
+
             if not final_only:
                 if last_check_step == step:
-                    print_msg("Checking asserts in step %d.." % (step))
+                    print_msg("Checking assertions in step %d.." % (step))
                 else:
-                    print_msg("Checking asserts in steps %d to %d.." % (step, last_check_step))
+                    print_msg("Checking assertions in steps %d to %d.." % (step, last_check_step))
                 smt.write("(push 1)")
 
                 smt.write("(assert (not (and %s)))" % " ".join(["(|%s_a| s%d)" % (topmod, i) for i in range(step, last_check_step+1)] +
@@ -1107,8 +1221,7 @@ else:  # not tempind, covermode
                             smt.write("(assert (|%s_h| s%d))" % (topmod, i))
                             smt.write("(assert (|%s_t| s%d s%d))" % (topmod, i-1, i))
                             smt.write("(assert %s)" % get_constr_expr(constr_assumes, i))
-                        print_msg("Re-solving with appended steps..")
-                        assert smt.check_sat() == "sat"
+                            assert smt.check_sat() == "sat"
                     print_anyconsts(step)
                     for i in range(step, last_check_step+1):
                         print_failed_asserts(i)
