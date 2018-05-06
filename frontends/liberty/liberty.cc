@@ -290,7 +290,7 @@ static void create_ff(RTLIL::Module *module, LibertyAst *node)
 	log_assert(!cell->type.empty());
 }
 
-static void create_latch(RTLIL::Module *module, LibertyAst *node)
+static bool create_latch(RTLIL::Module *module, LibertyAst *node, bool flag_ignore_miss_data_latch)
 {
 	RTLIL::SigSpec iq_sig(module->addWire(RTLIL::escape_id(node->args.at(0))));
 	RTLIL::SigSpec iqn_sig(module->addWire(RTLIL::escape_id(node->args.at(1))));
@@ -309,8 +309,14 @@ static void create_latch(RTLIL::Module *module, LibertyAst *node)
 			preset_sig = parse_func_expr(module, child->value.c_str());
 	}
 
-	if (enable_sig.size() == 0 || data_sig.size() == 0)
-		log_error("Latch cell %s has no data_in and/or enable attribute.\n", log_id(module->name));
+	if (enable_sig.size() == 0 || data_sig.size() == 0) {
+		if (!flag_ignore_miss_data_latch)
+			log_error("Latch cell %s has no data_in and/or enable attribute.\n", log_id(module->name));
+		else
+			log("Ignored latch cell %s with no data_in and/or enable attribute.\n", log_id(module->name));
+
+		return false;
+	}
 
 	for (bool rerun_invert_rollback = true; rerun_invert_rollback;)
 	{
@@ -399,6 +405,8 @@ static void create_latch(RTLIL::Module *module, LibertyAst *node)
 	cell->setPort("\\D", data_sig);
 	cell->setPort("\\Q", iq_sig);
 	cell->setPort("\\E", enable_sig);
+
+	return true;
 }
 
 void parse_type_map(std::map<std::string, std::tuple<int, int, bool>> &type_map, LibertyAst *ast)
@@ -455,9 +463,13 @@ struct LibertyFrontend : public Frontend {
 		log("    -lib\n");
 		log("        only create empty blackbox modules\n");
 		log("\n");
-		log("    -ignore_redef\n");
+		log("    -nooverwrite\n");
 		log("        ignore re-definitions of modules. (the default behavior is to\n");
-		log("        create an error message.)\n");
+		log("        create an error message if the existing module is not a blackbox\n");
+		log("        module, and overwrite the existing module if it is  a blackbox module.)\n");
+		log("\n");
+		log("    -overwrite\n");
+		log("        overwrite existing modules with the same name\n");
 		log("\n");
 		log("    -ignore_miss_func\n");
 		log("        ignore cells with missing function specification of outputs\n");
@@ -466,6 +478,9 @@ struct LibertyFrontend : public Frontend {
 		log("        ignore cells with a missing or invalid direction\n");
 		log("        specification on a pin\n");
 		log("\n");
+		log("    -ignore_miss_data_latch\n");
+		log("        ignore latches with missing data and/or enable pins\n");
+		log("\n");
 		log("    -setattr <attribute_name>\n");
 		log("        set the specified attribute (to the value 1) on all loaded modules\n");
 		log("\n");
@@ -473,9 +488,11 @@ struct LibertyFrontend : public Frontend {
 	virtual void execute(std::istream *&f, std::string filename, std::vector<std::string> args, RTLIL::Design *design)
 	{
 		bool flag_lib = false;
-		bool flag_ignore_redef = false;
+		bool flag_nooverwrite = false;
+		bool flag_overwrite = false;
 		bool flag_ignore_miss_func = false;
 		bool flag_ignore_miss_dir  = false;
+		bool flag_ignore_miss_data_latch = false;
 		std::vector<std::string> attributes;
 
 		log_header(design, "Executing Liberty frontend.\n");
@@ -487,8 +504,14 @@ struct LibertyFrontend : public Frontend {
 				flag_lib = true;
 				continue;
 			}
-			if (arg == "-ignore_redef") {
-				flag_ignore_redef = true;
+			if (arg == "-ignore_redef" || arg == "-nooverwrite") {
+				flag_nooverwrite = true;
+				flag_overwrite = false;
+				continue;
+			}
+			if (arg == "-overwrite") {
+				flag_nooverwrite = false;
+				flag_overwrite = true;
 				continue;
 			}
 			if (arg == "-ignore_miss_func") {
@@ -497,6 +520,10 @@ struct LibertyFrontend : public Frontend {
 			}
 			if (arg == "-ignore_miss_dir") {
 				flag_ignore_miss_dir = true;
+				continue;
+			}
+			if (arg == "-ignore_miss_data_latch") {
+				flag_ignore_miss_data_latch = true;
 				continue;
 			}
 			if (arg == "-setattr" && argidx+1 < args.size()) {
@@ -521,9 +548,16 @@ struct LibertyFrontend : public Frontend {
 			std::string cell_name = RTLIL::escape_id(cell->args.at(0));
 
 			if (design->has(cell_name)) {
-				if (flag_ignore_redef)
+				Module *existing_mod = design->module(cell_name);
+				if (!flag_nooverwrite && !flag_overwrite && !existing_mod->get_bool_attribute("\\blackbox")) {
+					log_error("Re-definition of of cell/module %s!\n", log_id(cell_name));
+				} else if (flag_nooverwrite) {
+					log("Ignoring re-definition of module %s.\n", log_id(cell_name));
 					continue;
-				log_error("Duplicate definition of cell/module %s.\n", RTLIL::unescape_id(cell_name).c_str());
+				} else {
+					log("Replacing existing%s module %s.\n", existing_mod->get_bool_attribute("\\blackbox") ? " blackbox" : "", log_id(cell_name));
+					design->remove(existing_mod);
+				}
 			}
 
 			// log("Processing cell type %s.\n", RTLIL::unescape_id(cell_name).c_str());
@@ -566,6 +600,12 @@ struct LibertyFrontend : public Frontend {
 
 					LibertyAst *dir = node->find("direction");
 
+					if (dir == nullptr) {
+						LibertyAst *pin = node->find("pin");
+						if (pin != nullptr)
+							dir = pin->find("direction");
+					}
+
 					if (!dir || (dir->value != "input" && dir->value != "output" && dir->value != "inout" && dir->value != "internal"))
 						log_error("Missing or invalid direction for bus %s on cell %s.\n", node->args.at(0).c_str(), log_id(module->name));
 
@@ -600,7 +640,10 @@ struct LibertyFrontend : public Frontend {
 					if (node->id == "ff" && node->args.size() == 2)
 						create_ff(module, node);
 					if (node->id == "latch" && node->args.size() == 2)
-						create_latch(module, node);
+						if (!create_latch(module, node, flag_ignore_miss_data_latch)) {
+							delete module;
+							goto skip_cell;
+						}
 				}
 
 				if (node->id == "pin" && node->args.size() == 1)

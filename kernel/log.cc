@@ -25,7 +25,7 @@
 #  include <sys/time.h>
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 #  include <dlfcn.h>
 #endif
 
@@ -41,7 +41,9 @@ YOSYS_NAMESPACE_BEGIN
 std::vector<FILE*> log_files;
 std::vector<std::ostream*> log_streams;
 std::map<std::string, std::set<std::string>> log_hdump;
-std::vector<std::regex> log_warn_regexes, log_nowarn_regexes;
+std::vector<std::regex> log_warn_regexes, log_nowarn_regexes, log_werror_regexes;
+std::set<std::string> log_warnings;
+int log_warnings_count = 0;
 bool log_hdump_all = false;
 FILE *log_errfile = NULL;
 SHA1 *log_hasher = NULL;
@@ -216,14 +218,30 @@ void logv_warning(const char *format, va_list ap)
 	}
 	else
 	{
-		if (log_errfile != NULL && !log_quiet_warnings)
-			log_files.push_back(log_errfile);
+		for (auto &re : log_werror_regexes)
+			if (std::regex_search(message, re))
+				log_error("%s",  message.c_str());
 
-		log("Warning: %s", message.c_str());
-		log_flush();
+		if (log_warnings.count(message))
+		{
+			log("Warning: %s", message.c_str());
+			log_flush();
+		}
+		else
+		{
+			if (log_errfile != NULL && !log_quiet_warnings)
+				log_files.push_back(log_errfile);
 
-		if (log_errfile != NULL && !log_quiet_warnings)
-			log_files.pop_back();
+			log("Warning: %s", message.c_str());
+			log_flush();
+
+			if (log_errfile != NULL && !log_quiet_warnings)
+				log_files.pop_back();
+
+			log_warnings.insert(message);
+		}
+
+		log_warnings_count++;
 	}
 }
 
@@ -242,14 +260,30 @@ void logv_warning_noprefix(const char *format, va_list ap)
 	}
 	else
 	{
-		if (log_errfile != NULL && !log_quiet_warnings)
-			log_files.push_back(log_errfile);
+		for (auto &re : log_werror_regexes)
+			if (std::regex_search(message, re))
+				log_error("%s",  message.c_str());
 
-		log("%s", message.c_str());
-		log_flush();
+		if (log_warnings.count(message))
+		{
+			log("%s", message.c_str());
+			log_flush();
+		}
+		else
+		{
+			if (log_errfile != NULL && !log_quiet_warnings)
+				log_files.push_back(log_errfile);
 
-		if (log_errfile != NULL && !log_quiet_warnings)
-			log_files.pop_back();
+			log("%s", message.c_str());
+			log_flush();
+
+			if (log_errfile != NULL && !log_quiet_warnings)
+				log_files.pop_back();
+
+			log_warnings.insert(message);
+		}
+
+		log_warnings_count++;
 	}
 }
 
@@ -358,7 +392,7 @@ void log_pop()
 	log_flush();
 }
 
-#if defined(__linux__) && defined(YOSYS_ENABLE_PLUGINS)
+#if (defined(__linux__) || defined(__FreeBSD__)) && defined(YOSYS_ENABLE_PLUGINS)
 void log_backtrace(const char *prefix, int levels)
 {
 	if (levels <= 0) return;
@@ -375,6 +409,9 @@ void log_backtrace(const char *prefix, int levels)
 
 	if (levels <= 1) return;
 
+#ifndef DEBUG
+	log("%sframe #2: [build Yosys with ENABLE_DEBUG for deeper backtraces]\n", prefix);
+#else
 	if ((p = __builtin_extract_return_addr(__builtin_return_address(1))) && dladdr(p, &dli)) {
 		log("%sframe #2: %p %s(%p) %s(%p)\n", prefix, p, dli.dli_fname, dli.dli_fbase, dli.dli_sname, dli.dli_saddr);
 	} else {
@@ -446,6 +483,7 @@ void log_backtrace(const char *prefix, int levels)
 	}
 
 	if (levels <= 9) return;
+#endif
 }
 #else
 void log_backtrace(const char*, int) { }
@@ -549,7 +587,7 @@ void log_wire(RTLIL::Wire *wire, std::string indent)
 // ---------------------------------------------------
 // This is the magic behind the code coverage counters
 // ---------------------------------------------------
-#if defined(YOSYS_ENABLE_COVER) && defined(__linux__)
+#if defined(YOSYS_ENABLE_COVER) && (defined(__linux__) || defined(__FreeBSD__))
 
 dict<std::string, std::pair<std::string, int>> extra_coverage_data;
 

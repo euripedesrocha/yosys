@@ -401,13 +401,20 @@ bool AstNode::simplify(bool const_fold, bool at_zero, bool in_lvalue, int stage,
 
 	if (type == AST_ALWAYS || type == AST_INITIAL)
 	{
+		if (current_always != nullptr)
+			log_error("Invalid nesting of always blocks and/or initializations at %s:%d.\n", filename.c_str(), linenum);
+
 		current_always = this;
 		current_always_clocked = false;
 
 		if (type == AST_ALWAYS)
-			for (auto child : children)
+			for (auto child : children) {
 				if (child->type == AST_POSEDGE || child->type == AST_NEGEDGE)
 					current_always_clocked = true;
+				if (child->type == AST_EDGE && GetSize(child->children) == 1 &&
+						child->children[0]->type == AST_IDENTIFIER && child->children[0]->str == "\\$global_clock")
+					current_always_clocked = true;
+			}
 	}
 
 	int backup_width_hint = width_hint;
@@ -1824,23 +1831,8 @@ skip_dynamic_range_lvalue_expansion:;
 				goto apply_newNode;
 			}
 
-			if (str == "\\$rose" || str == "\\$fell")
-			{
-				if (GetSize(children) != 1)
-					log_error("System function %s got %d arguments, expected 1 at %s:%d.\n",
-							RTLIL::unescape_id(str).c_str(), int(children.size()), filename.c_str(), linenum);
-
-				if (!current_always_clocked)
-					log_error("System function %s is only allowed in clocked blocks at %s:%d.\n",
-							RTLIL::unescape_id(str).c_str(), filename.c_str(), linenum);
-
-				newNode = new AstNode(AST_EQ, children.at(0)->clone(), clone());
-				newNode->children.at(1)->str = "\\$past";
-				goto apply_newNode;
-			}
-
 			// $anyconst and $anyseq are mapped in AstNode::genRTLIL()
-			if (str == "\\$anyconst" || str == "\\$anyseq") {
+			if (str == "\\$anyconst" || str == "\\$anyseq" || str == "\\$allconst" || str == "\\$allseq") {
 				recursion_counter--;
 				return false;
 			}
@@ -2646,6 +2638,7 @@ AstNode *AstNode::readmem(bool is_readmemh, std::string mem_filename, AstNode *m
 
 	std::ifstream f;
 	f.open(mem_filename.c_str());
+	yosys_input_files.insert(mem_filename);
 
 	if (f.fail())
 		log_error("Can not open file `%s` for %s at %s:%d.\n", mem_filename.c_str(), str.c_str(), filename.c_str(), linenum);

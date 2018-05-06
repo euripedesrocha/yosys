@@ -49,7 +49,9 @@ struct log_cmd_error_exception { };
 extern std::vector<FILE*> log_files;
 extern std::vector<std::ostream*> log_streams;
 extern std::map<std::string, std::set<std::string>> log_hdump;
-extern std::vector<std::regex> log_warn_regexes, log_nowarn_regexes;
+extern std::vector<std::regex> log_warn_regexes, log_nowarn_regexes, log_werror_regexes;
+extern std::set<std::string> log_warnings;
+extern int log_warnings_count;
 extern bool log_hdump_all;
 extern FILE *log_errfile;
 extern SHA1 *log_hasher;
@@ -112,7 +114,7 @@ static inline void log_assert_worker(bool cond, const char *expr, const char *fi
 // This is the magic behind the code coverage counters
 // ---------------------------------------------------
 
-#if defined(YOSYS_ENABLE_COVER) && defined(__linux__)
+#if defined(YOSYS_ENABLE_COVER) && (defined(__linux__) || defined(__FreeBSD__))
 
 #define cover(_id) do { \
     static CoverData __d __attribute__((section("yosys_cover_list"), aligned(1), used)) = { __FILE__, __FUNCTION__, _id, __LINE__, 0 }; \
@@ -171,7 +173,7 @@ struct PerformanceTimer
 	}
 
 	static int64_t query() {
-#  if _WIN32
+#  ifdef _WIN32
 		return 0;
 #  elif defined(_POSIX_TIMERS) && (_POSIX_TIMERS > 0)
 		struct timespec ts;

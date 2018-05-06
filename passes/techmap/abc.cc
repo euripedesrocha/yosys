@@ -111,6 +111,7 @@ bool recover_init;
 
 bool clk_polarity, en_polarity;
 RTLIL::SigSpec clk_sig, en_sig;
+dict<int, std::string> pi_map, po_map;
 
 int map_signal(RTLIL::SigBit bit, gate_type_t gate_type = G(NONE), int in1 = -1, int in2 = -1, int in3 = -1, int in4 = -1)
 {
@@ -601,6 +602,14 @@ struct abc_output_filter
 
 	void next_line(const std::string &line)
 	{
+		int pi, po;
+		if (sscanf(line.c_str(), "Start-point = pi%d.  End-point = po%d.", &pi, &po) == 2) {
+			log("ABC: Start-point = pi%d (%s).  End-point = po%d (%s).\n",
+					pi, pi_map.count(pi) ? pi_map.at(pi).c_str() : "???",
+					po, po_map.count(po) ? po_map.at(po).c_str() : "???");
+			return;
+		}
+
 		for (char ch : line)
 			next_char(ch);
 	}
@@ -616,6 +625,8 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 
 	signal_map.clear();
 	signal_list.clear();
+	pi_map.clear();
+	po_map.clear();
 	recover_init = false;
 
 	if (clk_str != "$")
@@ -768,7 +779,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 		if (!si.is_port || si.type != G(NONE))
 			continue;
 		fprintf(f, " n%d", si.id);
-		count_input++;
+		pi_map[count_input++] = log_signal(si.bit);
 	}
 	if (count_input == 0)
 		fprintf(f, " dummy_input\n");
@@ -780,7 +791,7 @@ void abc_module(RTLIL::Design *design, RTLIL::Module *current_module, std::strin
 		if (!si.is_port || si.type == G(NONE))
 			continue;
 		fprintf(f, " n%d", si.id);
-		count_output++;
+		po_map[count_output++] = log_signal(si.bit);
 	}
 	fprintf(f, "\n");
 
@@ -1377,8 +1388,12 @@ struct AbcPass : public Pass {
 		log("When neither -liberty nor -lut is used, the Yosys standard cell library is\n");
 		log("loaded into ABC before the ABC script is executed.\n");
 		log("\n");
-		log("This pass does not operate on modules with unprocessed processes in it.\n");
-		log("(I.e. the 'proc' pass should be used first to convert processes to netlists.)\n");
+		log("Note that this is a logic optimization pass within Yosys that is calling ABC\n");
+		log("internally. This is not going to \"run ABC on your design\". It will instead run\n");
+		log("ABC on logic snippets extracted from your design. You will not get any useful\n");
+		log("output when passing an ABC script that writes a file. Instead write your full\n");
+		log("design as BLIF file with write_blif and the load that into ABC externally if\n");
+		log("you want to use ABC to convert your design into another format.\n");
 		log("\n");
 		log("[1] http://www.eecs.berkeley.edu/~alanmi/abc/\n");
 		log("\n");
@@ -1392,6 +1407,8 @@ struct AbcPass : public Pass {
 		signal_list.clear();
 		signal_map.clear();
 		signal_init.clear();
+		pi_map.clear();
+		po_map.clear();
 
 #ifdef ABCEXTERNAL
 		std::string exe_file = ABCEXTERNAL;
@@ -1819,6 +1836,8 @@ struct AbcPass : public Pass {
 		signal_list.clear();
 		signal_map.clear();
 		signal_init.clear();
+		pi_map.clear();
+		po_map.clear();
 
 		log_pop();
 	}

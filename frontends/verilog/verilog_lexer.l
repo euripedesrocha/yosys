@@ -145,6 +145,9 @@ YOSYS_NAMESPACE_END
 "endfunction"  { return TOK_ENDFUNCTION; }
 "task"         { return TOK_TASK; }
 "endtask"      { return TOK_ENDTASK; }
+"specify"      { return TOK_SPECIFY; }
+"endspecify"   { return TOK_ENDSPECIFY; }
+"specparam"    { return TOK_SPECPARAM; }
 "package"      { SV_KEYWORD(TOK_PACKAGE); }
 "endpackage"   { SV_KEYWORD(TOK_ENDPACKAGE); }
 "parameter"    { return TOK_PARAMETER; }
@@ -170,6 +173,7 @@ YOSYS_NAMESPACE_END
 "endgenerate"  { return TOK_ENDGENERATE; }
 "while"        { return TOK_WHILE; }
 "repeat"       { return TOK_REPEAT; }
+"automatic"    { return TOK_AUTOMATIC; }
 
 "unique"       { SV_KEYWORD(TOK_UNIQUE); }
 "unique0"      { SV_KEYWORD(TOK_UNIQUE); }
@@ -237,10 +241,18 @@ YOSYS_NAMESPACE_END
 	while (yystr[i]) {
 		if (yystr[i] == '\\' && yystr[i + 1]) {
 			i++;
-			if (yystr[i] == 'n')
+			if (yystr[i] == 'a')
+				yystr[i] = '\a';
+			else if (yystr[i] == 'f')
+				yystr[i] = '\f';
+			else if (yystr[i] == 'n')
 				yystr[i] = '\n';
+			else if (yystr[i] == 'r')
+				yystr[i] = '\r';
 			else if (yystr[i] == 't')
 				yystr[i] = '\t';
+			else if (yystr[i] == 'v')
+				yystr[i] = '\v';
 			else if ('0' <= yystr[i] && yystr[i] <= '7') {
 				yystr[i] = yystr[i] - '0';
 				if ('0' <= yystr[i + 1] && yystr[i + 1] <= '7') {

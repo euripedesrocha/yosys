@@ -30,6 +30,10 @@
 #  include <readline/readline.h>
 #endif
 
+#ifdef YOSYS_ENABLE_EDITLINE
+#  include <editline/readline.h>
+#endif
+
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
@@ -677,6 +681,7 @@ struct ShowPass : public Pass {
 		bool flag_enum = false;
 		bool flag_abbreviate = true;
 		bool flag_notitle = false;
+		bool custom_prefix = false;
 		RTLIL::IdString colorattr;
 
 		size_t argidx;
@@ -693,6 +698,7 @@ struct ShowPass : public Pass {
 			}
 			if (arg == "-prefix" && argidx+1 < args.size()) {
 				prefix = args[++argidx];
+				custom_prefix = true;
 				continue;
 			}
 			if (arg == "-color" && argidx+2 < args.size()) {
@@ -778,6 +784,7 @@ struct ShowPass : public Pass {
 		for (auto filename : libfiles) {
 			std::ifstream f;
 			f.open(filename.c_str());
+			yosys_input_files.insert(filename);
 			if (f.fail())
 				log_error("Can't open lib file `%s'.\n", filename.c_str());
 			RTLIL::Design *lib = new RTLIL::Design;
@@ -793,6 +800,8 @@ struct ShowPass : public Pass {
 
 		log("Writing dot description to `%s'.\n", dot_file.c_str());
 		FILE *f = fopen(dot_file.c_str(), "w");
+		if (custom_prefix)
+			yosys_output_files.insert(dot_file);
 		if (f == NULL) {
 			for (auto lib : libs)
 				delete lib;

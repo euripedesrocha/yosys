@@ -154,6 +154,9 @@ bool handle_dffsr(RTLIL::Module *mod, RTLIL::Cell *cell)
 	if (used_pol_set && used_pol_clr && pol_set != pol_clr)
 		return did_something;
 
+	if (cell->type == "$dlatchsr")
+		return did_something;
+
 	State unified_pol = used_pol_set ? pol_set : pol_clr;
 
 	if (cell->type == "$dffsr")
@@ -430,6 +433,8 @@ struct OptRmdffPass : public Pass {
 
 			assign_map.set(module);
 			dff_init_map.set(module);
+			mux_drivers.clear();
+			init_attributes.clear();
 
 			for (auto wire : module->wires())
 			{
@@ -534,6 +539,7 @@ struct OptRmdffPass : public Pass {
 
 		assign_map.clear();
 		mux_drivers.clear();
+		init_attributes.clear();
 
 		if (total_count || total_initdrv)
 			design->scratchpad_set_bool("opt.did_something", true);

@@ -11,12 +11,14 @@ ENABLE_TCL := 1
 ENABLE_ABC := 1
 ENABLE_PLUGINS := 1
 ENABLE_READLINE := 1
+ENABLE_EDITLINE := 0
 ENABLE_VERIFIC := 0
 ENABLE_COVER := 1
 ENABLE_LIBYOSYS := 0
 
 # other configuration flags
 ENABLE_GPROF := 0
+ENABLE_DEBUG := 0
 ENABLE_NDEBUG := 0
 LINK_CURSES := 0
 LINK_TERMCAP := 0
@@ -62,6 +64,7 @@ PLUGIN_LDFLAGS :=
 PKG_CONFIG ?= pkg-config
 SED ?= sed
 BISON ?= bison
+STRIP ?= strip
 
 ifeq (Darwin,$(findstring Darwin,$(shell uname)))
 PLUGIN_LDFLAGS += -undefined dynamic_lookup
@@ -99,9 +102,9 @@ OBJS = kernel/version_$(GIT_REV).o
 # is just a symlink to your actual ABC working directory, as 'make mrproper'
 # will remove the 'abc' directory and you do not want to accidentally
 # delete your work on ABC..
-ABCREV = cd6984ee82d4
+ABCREV = f23ea8e
 ABCPULL = 1
-ABCURL ?= https://bitbucket.org/alanmi/abc
+ABCURL ?= https://github.com/berkeley-abc/abc
 ABCMKARGS = CC="$(CXX)" CXX="$(CXX)" ABC_USE_LIBSTDCXX=1
 
 # set ABCEXTERNAL = <abc-command> to use an external ABC instance
@@ -193,14 +196,14 @@ ABCMKARGS += LIBS="lib/x86/pthreadVC2.lib -s" ABC_USE_NO_READLINE=1 CC="$(CXX)" 
 EXE = .exe
 
 else ifeq ($(CONFIG),msys2)
-CXX = i686-w64-mingw32-gcc
-LD = i686-w64-mingw32-gcc
+CXX = i686-w64-mingw32-g++
+LD = i686-w64-mingw32-g++
 CXXFLAGS += -std=c++11 -Os -D_POSIX_SOURCE -DYOSYS_WIN32_UNIX_DIR
 CXXFLAGS := $(filter-out -fPIC,$(CXXFLAGS))
 LDFLAGS := $(filter-out -rdynamic,$(LDFLAGS)) -s
 LDLIBS := $(filter-out -lrt,$(LDLIBS))
 ABCMKARGS += ARCHFLAGS="-DSIZEOF_VOID_P=4 -DSIZEOF_LONG=4 -DSIZEOF_INT=4 -DWIN32_NO_DLL -DHAVE_STRUCT_TIMESPEC -fpermissive -w"
-ABCMKARGS += LIBS="lib/x86/pthreadVC2.lib -s" ABC_USE_NO_READLINE=0 CC="$(CXX)" CXX="$(CXX)"
+ABCMKARGS += LIBS="lib/x86/pthreadVC2.lib -s" ABC_USE_NO_READLINE=0 CC="i686-w64-mingw32-gcc" CXX="$(CXX)"
 EXE = .exe
 
 else ifneq ($(CONFIG),none)
@@ -224,6 +227,11 @@ ABCMKARGS += "ABC_READLINE_LIBRARIES=-lreadline -ltermcap"
 endif
 ifeq ($(CONFIG),mxe)
 LDLIBS += -ltermcap
+endif
+else
+ifeq ($(ENABLE_EDITLINE),1)
+CXXFLAGS += -DYOSYS_ENABLE_EDITLINE
+LDLIBS += -ledit -ltinfo -lbsd
 endif
 endif
 
@@ -251,7 +259,15 @@ LDFLAGS += -pg
 endif
 
 ifeq ($(ENABLE_NDEBUG),1)
-CXXFLAGS := -O3 -DNDEBUG $(filter-out -Os,$(CXXFLAGS))
+CXXFLAGS := -O3 -DNDEBUG $(filter-out -Os -ggdb,$(CXXFLAGS))
+endif
+
+ifeq ($(ENABLE_DEBUG),1)
+ifeq ($(CONFIG),clang)
+CXXFLAGS := -O0 -DDEBUG $(filter-out -Os,$(CXXFLAGS))
+else
+CXXFLAGS := -Og -DDEBUG $(filter-out -Os,$(CXXFLAGS))
+endif
 endif
 
 ifeq ($(ENABLE_ABC),1)
@@ -263,9 +279,9 @@ endif
 
 ifeq ($(ENABLE_VERIFIC),1)
 VERIFIC_DIR ?= /usr/local/src/verific_lib_eval
-VERIFIC_COMPONENTS ?= verilog vhdl database util containers sdf
+VERIFIC_COMPONENTS ?= verilog vhdl database util containers sdf hier_tree
 CXXFLAGS += $(patsubst %,-I$(VERIFIC_DIR)/%,$(VERIFIC_COMPONENTS)) -DYOSYS_ENABLE_VERIFIC
-LDLIBS += $(patsubst %,$(VERIFIC_DIR)/%/*-linux.a,$(VERIFIC_COMPONENTS))
+LDLIBS += $(patsubst %,$(VERIFIC_DIR)/%/*-linux.a,$(VERIFIC_COMPONENTS)) -lz
 endif
 
 ifeq ($(ENABLE_COVER),1)
@@ -409,23 +425,34 @@ kernel/version_$(GIT_REV).cc: $(YOSYS_SRC)/Makefile
 	$(P) rm -f kernel/version_*.o kernel/version_*.d kernel/version_*.cc
 	$(Q) mkdir -p kernel && echo "namespace Yosys { extern const char *yosys_version_str; const char *yosys_version_str=\"$(YOSYS_VER_STR)\"; }" > kernel/version_$(GIT_REV).cc
 
+ifeq ($(ENABLE_VERIFIC),1)
+CXXFLAGS_NOVERIFIC = $(foreach v,$(CXXFLAGS),$(if $(findstring $(VERIFIC_DIR),$(v)),,$(v)))
+LDLIBS_NOVERIFIC = $(foreach v,$(LDLIBS),$(if $(findstring $(VERIFIC_DIR),$(v)),,$(v)))
+else
+CXXFLAGS_NOVERIFIC = $(CXXFLAGS)
+LDLIBS_NOVERIFIC = $(LDLIBS)
+endif
+
 yosys-config: misc/yosys-config.in
-	$(P) $(SED) -e 's#@CXXFLAGS@#$(subst -I. -I"$(YOSYS_SRC)",-I"$(DATDIR)/include",$(CXXFLAGS))#;' \
-			-e 's#@CXX@#$(CXX)#;' -e 's#@LDFLAGS@#$(LDFLAGS) $(PLUGIN_LDFLAGS)#;' -e 's#@LDLIBS@#$(LDLIBS)#;' \
-			-e 's#@BINDIR@#$(BINDIR)#;' -e 's#@DATDIR@#$(DATDIR)#;' < $< > yosys-config
+	$(P) $(SED) -e 's#@CXXFLAGS@#$(subst -I. -I"$(YOSYS_SRC)",-I"$(DATDIR)/include",$(strip $(CXXFLAGS_NOVERIFIC)))#;' \
+			-e 's#@CXX@#$(strip $(CXX))#;' -e 's#@LDFLAGS@#$(strip $(LDFLAGS) $(PLUGIN_LDFLAGS))#;' -e 's#@LDLIBS@#$(strip $(LDLIBS_NOVERIFIC))#;' \
+			-e 's#@BINDIR@#$(strip $(BINDIR))#;' -e 's#@DATDIR@#$(strip $(DATDIR))#;' < $< > yosys-config
 	$(Q) chmod +x yosys-config
 
 abc/abc-$(ABCREV)$(EXE):
 	$(P)
 ifneq ($(ABCREV),default)
-	$(Q) if ( cd abc 2> /dev/null && hg identify; ) | grep -q +; then \
+	$(Q) if test -d abc/.hg; then \
+		echo 'REEBE: NOP qverpgbel vf n ut jbexvat pbcl! Erzbir nop/ naq er-eha "znxr".' | tr 'A-Za-z' 'N-ZA-Mn-za-m'; false; \
+	fi
+	$(Q) if ( cd abc 2> /dev/null && ! git diff-index --quiet HEAD; ); then \
 		echo 'REEBE: NOP pbagnvaf ybpny zbqvsvpngvbaf! Frg NOPERI=qrsnhyg va Lbflf Znxrsvyr!' | tr 'A-Za-z' 'N-ZA-Mn-za-m'; false; \
 	fi
-	$(Q) if test "`cd abc 2> /dev/null && hg identify | cut -f1 -d' '`" != "$(ABCREV)"; then \
+	$(Q) if test "`cd abc 2> /dev/null && git rev-parse --short HEAD`" != "$(ABCREV)"; then \
 		test $(ABCPULL) -ne 0 || { echo 'REEBE: NOP abg hc gb qngr naq NOPCHYY frg gb 0 va Znxrsvyr!' | tr 'A-Za-z' 'N-ZA-Mn-za-m'; exit 1; }; \
 		echo "Pulling ABC from $(ABCURL):"; set -x; \
-		test -d abc || hg clone $(ABCURL) abc; \
-		cd abc && $(MAKE) DEP= clean && hg pull && hg update -r $(ABCREV); \
+		test -d abc || git clone $(ABCURL) abc; \
+		cd abc && $(MAKE) DEP= clean && git fetch origin master && git checkout $(ABCREV); \
 	fi
 endif
 	$(Q) rm -f abc/abc-[0-9a-f]*
@@ -484,11 +511,21 @@ clean-unit-test:
 
 install: $(TARGETS) $(EXTRA_TARGETS)
 	$(INSTALL_SUDO) mkdir -p $(DESTDIR)$(BINDIR)
-	$(INSTALL_SUDO) install $(TARGETS) $(DESTDIR)$(BINDIR)
+	$(INSTALL_SUDO) cp $(TARGETS) $(DESTDIR)$(BINDIR)
+ifneq ($(filter yosys,$(TARGETS)),)
+	$(INSTALL_SUDO) $(STRIP) -S $(DESTDIR)$(BINDIR)/yosys
+endif
+ifneq ($(filter yosys-abc,$(TARGETS)),)
+	$(INSTALL_SUDO) $(STRIP) $(DESTDIR)$(BINDIR)/yosys-abc
+endif
+ifneq ($(filter yosys-filterlib,$(TARGETS)),)
+	$(INSTALL_SUDO) $(STRIP) $(DESTDIR)$(BINDIR)/yosys-filterlib
+endif
 	$(INSTALL_SUDO) mkdir -p $(DESTDIR)$(DATDIR)
 	$(INSTALL_SUDO) cp -r share/. $(DESTDIR)$(DATDIR)/.
 ifeq ($(ENABLE_LIBYOSYS),1)
 	$(INSTALL_SUDO) cp libyosys.so $(DESTDIR)$(LIBDIR)
+	$(INSTALL_SUDO) $(STRIP) -S $(DESTDIR)$(LIBDIR)/libyosys.so
 	$(INSTALL_SUDO) ldconfig
 endif
 

@@ -212,7 +212,7 @@ AstNode::AstNode(AstNodeType type, AstNode *child1, AstNode *child2, AstNode *ch
 }
 
 // create a (deep recursive) copy of a node
-AstNode *AstNode::clone()
+AstNode *AstNode::clone() const
 {
 	AstNode *that = new AstNode;
 	*that = *this;
@@ -224,7 +224,7 @@ AstNode *AstNode::clone()
 }
 
 // create a (deep recursive) copy of a node use 'other' as target root node
-void AstNode::cloneInto(AstNode *other)
+void AstNode::cloneInto(AstNode *other) const
 {
 	AstNode *tmp = clone();
 	other->delete_children();
@@ -254,7 +254,7 @@ AstNode::~AstNode()
 
 // create a nice text representation of the node
 // (traverse tree by recursion, use 'other' pointer for diffing two AST trees)
-void AstNode::dumpAst(FILE *f, std::string indent)
+void AstNode::dumpAst(FILE *f, std::string indent) const
 {
 	if (f == NULL) {
 		for (auto f : log_files)
@@ -333,7 +333,7 @@ static std::string id2vl(std::string txt)
 }
 
 // dump AST node as Verilog pseudo-code
-void AstNode::dumpVlog(FILE *f, std::string indent)
+void AstNode::dumpVlog(FILE *f, std::string indent) const
 {
 	bool first = true;
 	std::string txt;
@@ -755,7 +755,7 @@ AstNode *AstNode::mkconst_str(const std::string &str)
 	return node;
 }
 
-bool AstNode::bits_only_01()
+bool AstNode::bits_only_01() const
 {
 	for (auto bit : bits)
 		if (bit != RTLIL::S0 && bit != RTLIL::S1)
@@ -806,7 +806,7 @@ RTLIL::Const AstNode::asParaConst()
 	return val;
 }
 
-bool AstNode::asBool()
+bool AstNode::asBool() const
 {
 	log_assert(type == AST_CONSTANT);
 	for (auto &bit : bits)
@@ -815,7 +815,7 @@ bool AstNode::asBool()
 	return false;
 }
 
-int AstNode::isConst()
+int AstNode::isConst() const
 {
 	if (type == AST_CONSTANT)
 		return 1;
@@ -1003,7 +1003,7 @@ static AstModule* process_module(AstNode *ast, bool defer)
 
 // create AstModule instances for all modules in the AST tree and add them to 'design'
 void AST::process(RTLIL::Design *design, AstNode *ast, bool dump_ast1, bool dump_ast2, bool dump_vlog, bool dump_rtlil,
-		bool nolatches, bool nomeminit, bool nomem2reg, bool mem2reg, bool lib, bool noopt, bool icells, bool ignore_redef, bool defer, bool autowire)
+		bool nolatches, bool nomeminit, bool nomem2reg, bool mem2reg, bool lib, bool noopt, bool icells, bool nooverwrite, bool overwrite, bool defer, bool autowire)
 {
 	current_ast = ast;
 	flag_dump_ast1 = dump_ast1;
@@ -1042,12 +1042,20 @@ void AST::process(RTLIL::Design *design, AstNode *ast, bool dump_ast1, bool dump
 				(*it)->str = "$abstract" + (*it)->str;
 
 			if (design->has((*it)->str)) {
-				if (!ignore_redef)
+				RTLIL::Module *existing_mod = design->module((*it)->str);
+				if (!nooverwrite && !overwrite && !existing_mod->get_bool_attribute("\\blackbox")) {
 					log_error("Re-definition of module `%s' at %s:%d!\n",
 							(*it)->str.c_str(), (*it)->filename.c_str(), (*it)->linenum);
-				log("Ignoring re-definition of module `%s' at %s:%d!\n",
-						(*it)->str.c_str(), (*it)->filename.c_str(), (*it)->linenum);
-				continue;
+				} else if (nooverwrite) {
+					log("Ignoring re-definition of module `%s' at %s:%d.\n",
+							(*it)->str.c_str(), (*it)->filename.c_str(), (*it)->linenum);
+					continue;
+				} else {
+					log("Replacing existing%s module `%s' at %s:%d.\n",
+							existing_mod->get_bool_attribute("\\blackbox") ? " blackbox" : "",
+							(*it)->str.c_str(), (*it)->filename.c_str(), (*it)->linenum);
+					design->remove(existing_mod);
+				}
 			}
 
 			design->add(process_module(*it, defer));
@@ -1067,7 +1075,7 @@ AstModule::~AstModule()
 }
 
 // create a new parametric module (when needed) and return the name of the generated module
-RTLIL::IdString AstModule::derive(RTLIL::Design *design, dict<RTLIL::IdString, RTLIL::Const> parameters)
+RTLIL::IdString AstModule::derive(RTLIL::Design *design, dict<RTLIL::IdString, RTLIL::Const> parameters, bool)
 {
 	std::string stripped_name = name.str();
 

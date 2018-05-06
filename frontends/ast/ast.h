@@ -190,8 +190,8 @@ namespace AST
 
 		// creating and deleting nodes
 		AstNode(AstNodeType type = AST_NONE, AstNode *child1 = NULL, AstNode *child2 = NULL, AstNode *child3 = NULL);
-		AstNode *clone();
-		void cloneInto(AstNode *other);
+		AstNode *clone() const;
+		void cloneInto(AstNode *other) const;
 		void delete_children();
 		~AstNode();
 
@@ -234,8 +234,8 @@ namespace AST
 		AstNode *eval_const_function(AstNode *fcall);
 
 		// create a human-readable text representation of the AST (for debugging)
-		void dumpAst(FILE *f, std::string indent);
-		void dumpVlog(FILE *f, std::string indent);
+		void dumpAst(FILE *f, std::string indent) const;
+		void dumpVlog(FILE *f, std::string indent) const;
 
 		// used by genRTLIL() for detecting expression width and sign
 		void detectSignWidthWorker(int &width_hint, bool &sign_hint, bool *found_real = NULL);
@@ -264,18 +264,18 @@ namespace AST
 		RTLIL::Const asAttrConst();
 		RTLIL::Const asParaConst();
 		uint64_t asInt(bool is_signed);
-		bool bits_only_01();
-		bool asBool();
+		bool bits_only_01() const;
+		bool asBool() const;
 
 		// helper functions for real valued const eval
-		int isConst(); // return '1' for AST_CONSTANT and '2' for AST_REALVALUE
+		int isConst() const; // return '1' for AST_CONSTANT and '2' for AST_REALVALUE
 		double asReal(bool is_signed);
 		RTLIL::Const realAsConst(int width);
 	};
 
 	// process an AST tree (ast must point to an AST_DESIGN node) and generate RTLIL code
 	void process(RTLIL::Design *design, AstNode *ast, bool dump_ast1, bool dump_ast2, bool dump_vlog, bool dump_rtlil, bool nolatches, bool nomeminit,
-			bool nomem2reg, bool mem2reg, bool lib, bool noopt, bool icells, bool ignore_redef, bool defer, bool autowire);
+			bool nomem2reg, bool mem2reg, bool lib, bool noopt, bool icells, bool nooverwrite, bool overwrite, bool defer, bool autowire);
 
 	// parametric modules are supported directly by the AST library
 	// therefore we need our own derivate of RTLIL::Module with overloaded virtual functions
@@ -283,7 +283,7 @@ namespace AST
 		AstNode *ast;
 		bool nolatches, nomeminit, nomem2reg, mem2reg, lib, noopt, icells, autowire;
 		virtual ~AstModule();
-		virtual RTLIL::IdString derive(RTLIL::Design *design, dict<RTLIL::IdString, RTLIL::Const> parameters);
+		virtual RTLIL::IdString derive(RTLIL::Design *design, dict<RTLIL::IdString, RTLIL::Const> parameters, bool mayfail);
 		virtual RTLIL::Module *clone() const;
 	};
 

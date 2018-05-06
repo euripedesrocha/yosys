@@ -62,11 +62,18 @@ struct SynthIce40Pass : public ScriptPass
 		log("    -nocarry\n");
 		log("        do not use SB_CARRY cells in output netlist\n");
 		log("\n");
+		log("    -nodffe\n");
+		log("        do not use SB_DFFE* cells in output netlist\n");
+		log("\n");
 		log("    -nobram\n");
 		log("        do not use SB_RAM40_4K* cells in output netlist\n");
 		log("\n");
 		log("    -abc2\n");
 		log("        run two passes of 'abc' for slightly improved logic density\n");
+		log("\n");
+		log("    -vpr\n");
+		log("        generate an output netlist (and BLIF file) suitable for VPR\n");
+		log("        (this feature is experimental and incomplete)\n");
 		log("\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
@@ -75,7 +82,7 @@ struct SynthIce40Pass : public ScriptPass
 	}
 
 	string top_opt, blif_file, edif_file;
-	bool nocarry, nobram, flatten, retime, abc2;
+	bool nocarry, nodffe, nobram, flatten, retime, abc2, vpr;
 
 	virtual void clear_flags() YS_OVERRIDE
 	{
@@ -83,10 +90,12 @@ struct SynthIce40Pass : public ScriptPass
 		blif_file = "";
 		edif_file = "";
 		nocarry = false;
+		nodffe = false;
 		nobram = false;
 		flatten = true;
 		retime = false;
 		abc2 = false;
+		vpr = false;
 	}
 
 	virtual void execute(std::vector<std::string> args, RTLIL::Design *design) YS_OVERRIDE
@@ -133,12 +142,20 @@ struct SynthIce40Pass : public ScriptPass
 				nocarry = true;
 				continue;
 			}
+			if (args[argidx] == "-nodffe") {
+				nodffe = true;
+				continue;
+			}
 			if (args[argidx] == "-nobram") {
 				nobram = true;
 				continue;
 			}
 			if (args[argidx] == "-abc2") {
 				abc2 = true;
+				continue;
+			}
+			if (args[argidx] == "-vpr") {
+				vpr = true;
 				continue;
 			}
 			break;
@@ -200,8 +217,9 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("map_ffs"))
 		{
 			run("dffsr2dff");
-			run("dff2dffe -direct-match $_DFF_*");
-			run("techmap -map +/ice40/cells_map.v");
+			if (!nodffe)
+				run("dff2dffe -direct-match $_DFF_*");
+			run("techmap -D NO_LUT -map +/ice40/cells_map.v");
 			run("opt_expr -mux_undef");
 			run("simplemap");
 			run("ice40_ffinit");
@@ -222,7 +240,11 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("map_cells"))
 		{
-			run("techmap -map +/ice40/cells_map.v");
+			if (vpr)
+				run("techmap -D NO_LUT -map +/ice40/cells_map.v");
+			else
+				run("techmap -map +/ice40/cells_map.v", "(with -D NO_LUT in vpr mode)");
+
 			run("clean");
 		}
 
@@ -235,8 +257,21 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("blif"))
 		{
-			if (!blif_file.empty() || help_mode)
-				run(stringf("write_blif -gates -attr -param %s", help_mode ? "<file-name>" : blif_file.c_str()));
+			if (!blif_file.empty() || help_mode) {
+				if (vpr || help_mode) {
+					run(stringf("opt_clean -purge"),
+						"                                        "
+						" (vpr mode)");
+					run(stringf("write_blif -attr -cname -conn -param %s",
+								help_mode ? "<file-name>" : blif_file.c_str()),
+						" (vpr mode)");
+				}
+				if (!vpr)
+					run(stringf("write_blif -gates -attr -param %s",
+								help_mode ? "<file-name>" : blif_file.c_str()),
+						"              "
+						" (non-vpr mode)");
+			}
 		}
 
 		if (check_label("edif"))

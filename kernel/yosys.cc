@@ -25,6 +25,10 @@
 #  include <readline/history.h>
 #endif
 
+#ifdef YOSYS_ENABLE_EDITLINE
+#  include <editline/readline.h>
+#endif
+
 #ifdef YOSYS_ENABLE_PLUGINS
 #  include <dlfcn.h>
 #endif
@@ -42,8 +46,13 @@
 #  include <unistd.h>
 #  include <dirent.h>
 #  include <sys/types.h>
+#  include <sys/wait.h>
 #  include <sys/stat.h>
 #  include <glob.h>
+#endif
+
+#ifdef __FreeBSD__
+#  include <sys/sysctl.h>
 #endif
 
 #include <limits.h>
@@ -60,13 +69,15 @@ CellTypes yosys_celltypes;
 Tcl_Interp *yosys_tcl_interp = NULL;
 #endif
 
+std::set<std::string> yosys_input_files, yosys_output_files;
+
 bool memhasher_active = false;
 uint32_t memhasher_rng = 123456;
 std::vector<void*> memhasher_store;
 
 void memhasher_on()
 {
-#ifdef __linux__
+#if defined(__linux__) || defined(__FreeBSD__)
 	memhasher_rng += time(NULL) << 16 ^ getpid();
 #endif
 	memhasher_store.resize(0x10000);
@@ -106,7 +117,7 @@ void yosys_banner()
 	log(" |                                                                            |\n");
 	log(" |  yosys -- Yosys Open SYnthesis Suite                                       |\n");
 	log(" |                                                                            |\n");
-	log(" |  Copyright (C) 2012 - 2016  Clifford Wolf <clifford@clifford.at>           |\n");
+	log(" |  Copyright (C) 2012 - 2018  Clifford Wolf <clifford@clifford.at>           |\n");
 	log(" |                                                                            |\n");
 	log(" |  Permission to use, copy, modify, and/or distribute this software for any  |\n");
 	log(" |  purpose with or without fee is hereby granted, provided that the above    |\n");
@@ -592,6 +603,8 @@ static int tcl_yosys_cmd(ClientData, Tcl_Interp *interp, int argc, const char *a
 			std::string tcl_command_name = it.first;
 			if (tcl_command_name == "proc")
 				tcl_command_name = "procs";
+			else if (tcl_command_name == "rename")
+				tcl_command_name = "renames";
 			Tcl_CmdInfo info;
 			if (Tcl_GetCommandInfo(interp, tcl_command_name.c_str(), &info) != 0) {
 				log("[TCL: yosys -import] Command name collision: found pre-existing command `%s' -> skip.\n", it.first.c_str());
@@ -631,9 +644,9 @@ struct TclPass : public Pass {
 		log("Use 'yosys cmd' to run the yosys command 'cmd' from tcl.\n");
 		log("\n");
 		log("The tcl command 'yosys -import' can be used to import all yosys\n");
-		log("commands directly as tcl commands to the tcl shell. The yosys\n");
-		log("command 'proc' is wrapped using the tcl command 'procs' in order\n");
-		log("to avoid a name collision with the tcl builtin command 'proc'.\n");
+		log("commands directly as tcl commands to the tcl shell. Yosys commands\n");
+		log("'proc' and 'rename' are wrapped to tcl commands 'procs' and 'renames'\n");
+		log("in order to avoid a name collision with the built in commands.\n");
 		log("\n");
 	}
 	virtual void execute(std::vector<std::string> args, RTLIL::Design *design) {
@@ -658,6 +671,26 @@ std::string proc_self_dirname()
 	while (buflen > 0 && path[buflen-1] != '/')
 		buflen--;
 	return std::string(path, buflen);
+}
+#elif defined(__FreeBSD__)
+std::string proc_self_dirname()
+{
+	int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
+	size_t buflen;
+	char *buffer;
+	std::string path;
+	if (sysctl(mib, 4, NULL, &buflen, NULL, 0) != 0)
+		log_error("sysctl failed: %s\n", strerror(errno));
+	buffer = (char*)malloc(buflen);
+	if (buffer == NULL)
+		log_error("malloc failed: %s\n", strerror(errno));
+	if (sysctl(mib, 4, buffer, &buflen, NULL, 0) != 0)
+		log_error("sysctl failed: %s\n", strerror(errno));
+	while (buflen > 0 && buffer[buflen-1] != '/')
+		buflen--;
+	path.assign(buffer, buflen);
+	free(buffer);
+	return path;
 }
 #elif defined(__APPLE__)
 std::string proc_self_dirname()
@@ -827,8 +860,10 @@ void run_frontend(std::string filename, std::string command, std::string *backen
 
 		FILE *f = stdin;
 
-		if (filename != "-")
+		if (filename != "-") {
 			f = fopen(filename.c_str(), "r");
+			yosys_input_files.insert(filename);
+		}
 
 		if (f == NULL)
 			log_error("Can't open script file `%s' for reading: %s\n", filename.c_str(), strerror(errno));
@@ -938,7 +973,7 @@ void run_backend(std::string filename, std::string command, RTLIL::Design *desig
 	Backend::backend_call(design, NULL, filename, command);
 }
 
-#ifdef YOSYS_ENABLE_READLINE
+#if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
 static char *readline_cmd_generator(const char *text, int state)
 {
 	static std::map<std::string, Pass*>::iterator it;
@@ -1025,14 +1060,14 @@ void shell(RTLIL::Design *design)
 	recursion_counter++;
 	log_cmd_error_throw = true;
 
-#ifdef YOSYS_ENABLE_READLINE
-	rl_readline_name = "yosys";
+#if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
+	rl_readline_name = (char*)"yosys";
 	rl_attempted_completion_function = readline_completion;
-	rl_basic_word_break_characters = " \t\n";
+	rl_basic_word_break_characters = (char*)" \t\n";
 #endif
 
 	char *command = NULL;
-#ifdef YOSYS_ENABLE_READLINE
+#if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
 	while ((command = readline(create_prompt(design, recursion_counter))) != NULL)
 	{
 #else
@@ -1046,7 +1081,7 @@ void shell(RTLIL::Design *design)
 #endif
 		if (command[strspn(command, " \t\r\n")] == 0)
 			continue;
-#ifdef YOSYS_ENABLE_READLINE
+#if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
 		add_history(command);
 #endif
 
@@ -1114,7 +1149,7 @@ struct ShellPass : public Pass {
 	}
 } ShellPass;
 
-#ifdef YOSYS_ENABLE_READLINE
+#if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
 struct HistoryPass : public Pass {
 	HistoryPass() : Pass("history", "show last interactive commands") { }
 	virtual void help() {
@@ -1128,8 +1163,13 @@ struct HistoryPass : public Pass {
 	}
 	virtual void execute(std::vector<std::string> args, RTLIL::Design *design) {
 		extra_args(args, 1, design, false);
+#ifdef YOSYS_ENABLE_READLINE
 		for(HIST_ENTRY **list = history_list(); *list != NULL; list++)
 			log("%s\n", (*list)->line);
+#else
+		for (int i = where_history(); history_get(i); i++)
+			log("%s\n", history_get(i)->line);
+#endif
 	}
 } HistoryPass;
 #endif
